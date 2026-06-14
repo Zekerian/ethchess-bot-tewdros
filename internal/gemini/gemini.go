@@ -1,40 +1,52 @@
 package gemini
 
 import (
+	"bytes"
 	"context"
 	"encoding/json"
+	tgmd "github.com/Mad-Pixels/goldmark-tgmd"
 	"github.com/joho/godotenv"
 	"google.golang.org/genai"
 	"log"
 	"os"
+	"strings"
 )
 
 // Your Google API key
 
-func GeminiResponse() string {
+type GeminiModels int
 
-	//	var GeminiRes struct {
-	//		Url string `json:"url"`
-	//	}
+const (
+	Gemma_4_31b GeminiModels = iota
+	Gemma_4_26_A4B
+)
 
-	//if err := json.Unmarshal(body, &LichessChallengeResponse); err != nil {
-	//		return fmt.Errorf("parsing failed: %w", err)
-	//	}
+// A map to store the string representation of each state
+var Models = map[GeminiModels]string{
+	Gemma_4_31b:    "gemma-4-31b-it",
+	Gemma_4_26_A4B: "gemma-4-26b-a4b-it",
+}
 
-	type Part struct {
-		Text string `json:"text"`
-		Role string `json:"role"`
+// String implements the fmt.Stringer interface
+func (n GeminiModels) String() string {
+	return Models[n]
+}
+
+func GeminiResponse(userRequest string, model string, chatt *genai.Chat, systemInstruction *genai.Content) (string, *genai.Chat) {
+
+	GoogleSearch := &genai.GoogleSearch{
+		SearchTypes: &genai.SearchTypes{
+			WebSearch: &genai.WebSearch{},
+			//	ImageSearch: &genai.ImageSearch{},
+		},
 	}
-
-	type Content struct {
-		Parts []Part `json:"parts"`
-		Role  string `json:"role"`
+	Tools := &genai.Tool{
+		GoogleSearch: GoogleSearch,
 	}
+	type Part *genai.Part
+	type Content *genai.Content
+	type Candidate *genai.Candidate
 
-	type Candidate struct {
-		Content      Content `json:"content"`
-		FinishReason string  `json:"finishReason"`
-	}
 	var GeminiRes struct {
 		Url string `json:"url"`
 
@@ -55,26 +67,33 @@ func GeminiResponse() string {
 		log.Fatal(err)
 	}
 
-	chat, err := client.Chats.Create(ctx, "gemini-2.5-flash", nil, nil)
+	chat, err := client.Chats.Create(ctx, model, &genai.GenerateContentConfig{
+		Tools:             []*genai.Tool{Tools},
+		SystemInstruction: systemInstruction,
+	}, chatt.History(true))
 	if err != nil {
 		log.Fatal(err)
 	}
 
-	result, err := chat.SendMessage(ctx, genai.Part{Text: "What's the weather in New York?"})
+	result, err := chat.SendMessage(ctx, genai.Part{Text: userRequest})
 	if err != nil {
-		log.Fatal(err)
+		return "Sorry, I'm having trouble connecting right now Please try again in a moment", chat
 	}
-	debugPrint(result)
-
-	result, err = chat.SendMessage(ctx, genai.Part{Text: "How about San Francisco?"})
-	if err != nil {
-		log.Fatal(err)
-	}
-
 	geminiRes := debugPrint(result)
 
 	json.Unmarshal(geminiRes, &GeminiRes)
-	return GeminiRes.Candidates[0].Content.Parts[0].Text
+
+	response := extractResponseText(GeminiRes.Candidates[0].Content.Parts)
+
+	var buf bytes.Buffer
+	md := tgmd.TGMD()
+
+	err = md.Convert([]byte(response), &buf)
+	if err != nil {
+		panic(err)
+	}
+
+	return buf.String(), chat
 
 }
 
@@ -86,4 +105,16 @@ func debugPrint[T any](r *T) []byte {
 	}
 
 	return response
+}
+func extractResponseText(parts []*genai.Part) string {
+	var sb strings.Builder
+	for _, part := range parts {
+		if part.Thought {
+			continue // skip reasoning/thinking parts
+		}
+		if part.Text != "" {
+			sb.WriteString(part.Text)
+		}
+	}
+	return sb.String()
 }

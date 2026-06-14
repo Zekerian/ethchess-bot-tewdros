@@ -1,24 +1,27 @@
 package main
 
 import (
-	"encoding/json"
 	"fmt"
+	"log"
+	"os"
+	"strconv"
+	"time"
+
 	"github.com/PaulSonOfLars/gotgbot/v2"
 	"github.com/PaulSonOfLars/gotgbot/v2/ext"
 	"github.com/PaulSonOfLars/gotgbot/v2/ext/handlers"
 	"github.com/YeiyoNathnael/ethchess-bot-tewdros/internal/gemini"
+	"github.com/YeiyoNathnael/ethchess-bot-tewdros/internal/lichess"
 	"github.com/joho/godotenv"
-	"io"
-	"log"
-	"net/http"
-	"net/url"
-	"os"
-	"strconv"
-	"strings"
-	"time"
+	"google.golang.org/genai"
 )
 
+// var botID int = 7720642643
+var botUserName string = "@ETHCHESSSupportbot"
+var history *genai.Chat
+
 func main() {
+
 	// Get token from the environment variable
 	err := godotenv.Load()
 	token := os.Getenv("TOKEN")
@@ -26,7 +29,6 @@ func main() {
 		panic("TOKEN environment variable is empty")
 	}
 
-	// Create bot from environment value.
 	b, err := gotgbot.NewBot(token, nil)
 	if err != nil {
 		panic("failed to create new bot: " + err.Error())
@@ -44,14 +46,25 @@ func main() {
 
 	// /start command to introduce the bot
 	dispatcher.AddHandler(handlers.NewCommand("start", start))
-	dispatcher.AddHandler(handlers.NewCommand("blitz", blitz))
-	dispatcher.AddHandler(handlers.NewCommand("blitzr", blitzr))
-	dispatcher.AddHandler(handlers.NewCommand("bullet", bullet))
-	dispatcher.AddHandler(handlers.NewCommand("bulletr", bulletr))
-	dispatcher.AddHandler(handlers.NewCommand("open", open))
+	dispatcher.AddHandler(handlers.NewCommand("blitz", lichess.Blitz))
+	dispatcher.AddHandler(handlers.NewCommand("blitzr", lichess.Blitzr))
+	dispatcher.AddHandler(handlers.NewCommand("bullet", lichess.Bullet))
+	dispatcher.AddHandler(handlers.NewCommand("bulletr", lichess.Bulletr))
 
-	dispatcher.AddHandler(handlers.NewCommand("openChat", chat))
+	dispatcher.AddHandler(handlers.NewCommand("user", getLichessRating))
+	dispatcher.AddHandler(handlers.NewCommand("open", lichess.Open))
 
+	dispatcher.AddHandler(handlers.NewMessage(func(msg *gotgbot.Message) bool {
+		for _, e := range msg.Entities {
+			if e.Type == "mention" {
+				mentioned := msg.Text[e.Offset : e.Offset+e.Length]
+				if mentioned == botUserName {
+					return true
+				}
+			}
+		}
+		return (msg.ReplyToMessage != nil || msg.NewChatMembers != nil)
+	}, chat))
 	err = updater.StartPolling(b, &ext.PollingOpts{
 		DropPendingUpdates: true,
 		GetUpdatesOpts: &gotgbot.GetUpdatesOpts{
@@ -61,6 +74,7 @@ func main() {
 			},
 		},
 	})
+
 	if err != nil {
 		panic("failed to start polling: " + err.Error())
 	}
@@ -68,122 +82,124 @@ func main() {
 	// Idle, to keep updates coming in, and avoid bot stopping.
 	updater.Idle()
 }
+
+// NOTE: This is a really random function, not really there to serve a purpose
+func getLichessRating(b *gotgbot.Bot, ctx *ext.Context) error {
+
+	username := ctx.Args()
+
+	if len(username) < 2 {
+
+		_, _ = ctx.EffectiveMessage.Reply(b, "PLease PLease provide a proper username", nil)
+
+		return nil
+
+	}
+
+	user := username[1]
+	userRating := lichess.GetLichessUser(user)
+	_, _ = ctx.EffectiveMessage.Reply(b, "User Bullet rating is: "+strconv.FormatInt(userRating, 10), &gotgbot.SendMessageOpts{
+		ParseMode: "HTML",
+	})
+	return nil
+}
+
 func chat(b *gotgbot.Bot, ctx *ext.Context) error {
 
-	msg := gemini.GeminiResponse()
-	_, err := ctx.EffectiveMessage.Reply(b, msg, &gotgbot.SendMessageOpts{
-		ParseMode: "MarkdownV2",
-	},
-	)
-	if err != nil {
-		return fmt.Errorf("failed to send source: %w", err)
+	systemInstruction := &genai.Content{
+		Role: "user",
+		Parts: []*genai.Part{
+			{
+				Text: `You are Tewodros (Teddy), the official support bot of EthChess — Ethiopia's fastest-growing chess community, based in Addis Ababa.
+
+ABOUT ETHCHESS:
+- Based in Addis Ababa, Ethiopia
+- Founded: 2022
+				- Social media: 
+					-Instagram: https://www.instagram.com/ethchessofficial
+					-Tiktok: https://www.tiktok.com/@ethchess_official
+				  -Telegram Channel: https://t.me/ETHchess1
+					-X: https://x.com/ETHchess_
+- Contact and Founder: @Biniyam_girma_1,@idontknowbrother
+ROLE: Help members, newcomers, and chess enthusiasts with EthChess events, membership, tournaments, and general chess questions. Decline anything unrelated to chess or EthChess politely.
+AUDIENCE: Ethiopian chess players ranging from beginners to competitive players.
+RULES:
+1. Always be friendly, warm, and community-oriented.
+2. Keep every response under 10 sentences — be concise.
+3. Google search for most non-rhetorical, non-trivial questions before answering.
+4. If you haven't searched for something, say the answer is ungrounded and offer to search.
+5. If you don't know club-specific details, say so and direct them to: @Biniyam_girma_1.
+6. If the user writes in Amharic, respond in Amharic.
+7. If the user uses transliteration of amharic using english letters, do the same when u respond to him.
+8. Light chess humor and analogies are welcome.
+9. Always represent EthChess positively and professionally.`,
+			}},
 	}
-
-	return nil
-
-}
-func openChallenge(b *gotgbot.Bot, ctx *ext.Context, clockLimit string, clockIncrement string, duelName string, rated bool) error {
-
-	urlL := "https://lichess.org/api/challenge/open"
-
-	postData := url.Values{}
-	postData.Set("rated", strconv.FormatBool(rated))
-	postData.Set("clock.limit", clockLimit)
-	postData.Set("clock.increment", clockIncrement)
-	postData.Set("days", "1")
-	postData.Set("variant", "standard")
-	postData.Set("fen", "rnbqkbnr/pppppppp/8/8/8/8/PPPPPPPP/RNBQKBNR w KQkq - 0 1")
-	postData.Set("name", duelName)
-
-	req, _ := http.NewRequest("POST", urlL, strings.NewReader(postData.Encode()))
-
-	req.Header.Add("Content-Type", "application/x-www-form-urlencoded")
-
-	res, _ := http.DefaultClient.Do(req)
-
-	defer res.Body.Close()
-	body, _ := io.ReadAll(res.Body)
-
-	fmt.Println(res)
-	fmt.Println(string(body))
-
-	var LichessChallengeResponse struct {
-		Url string `json:"url"`
+	msg := ctx.EffectiveMessage
+	if history == nil {
+		history = &genai.Chat{}
 	}
+	for _, e := range msg.NewChatMembers {
 
-	if err := json.Unmarshal(body, &LichessChallengeResponse); err != nil {
-		return fmt.Errorf("parsing failed: %w", err)
-	}
+		joinedUser := e.Username
+		systemInstructionNewJoiningUser := &genai.Content{
+			Role: "user",
+			Parts: []*genai.Part{
+				{
+					Text: "a brief welcome message for user who just joined our chess club telegram group called ethchess. make it only 2 sentences, very warm and breif as well.ethchess is a chess club found in Ethiopia and the fastest growing chess community in ethiopia.  only send me the welcome message nothing else. the user's name is" + joinedUser,
+				},
+			},
+		}
+   b.SendChatAction(msg.Chat.Id, "typing", nil)
+		geminiResponse, chat := gemini.GeminiResponse("greet the user", gemini.Gemma_4_26_A4B.String(), history, systemInstructionNewJoiningUser)
 
-	link := LichessChallengeResponse.Url
+		_, err := msg.Reply(b, geminiResponse, &gotgbot.SendMessageOpts{
+			ParseMode: "MarkdownV2",
 
-	_, err := ctx.EffectiveMessage.Reply(b, link, &gotgbot.SendMessageOpts{
-		ParseMode: "HTML",
-	},
-	)
-	if err != nil {
-		return fmt.Errorf("failed to send source: %w", err)
-	}
-
-	return nil
-
-}
-
-func blitz(b *gotgbot.Bot, ctx *ext.Context) error {
-
-	openChallenge(b, ctx, "180", "0", "Grand Blitz Duel", false)
-
-	return nil
-
-}
-
-func blitzr(b *gotgbot.Bot, ctx *ext.Context) error {
-
-	openChallenge(b, ctx, "180", "2", "Grand Blitz Duel", true)
-
-	return nil
-
-}
-
-func bullet(b *gotgbot.Bot, ctx *ext.Context) error {
-
-	openChallenge(b, ctx, "60", "0", "Grand Blitz Duel", false)
-
-	return nil
-
-}
-
-func bulletr(b *gotgbot.Bot, ctx *ext.Context) error {
-
-	openChallenge(b, ctx, "60", "0", "Grand Blitz Duel", true)
-
-	return nil
-
-}
-
-func open(b *gotgbot.Bot, ctx *ext.Context) error {
-
-	args := ctx.Args()
-
-	if len(args) < 2 {
-
-		_, err := ctx.EffectiveMessage.Reply(b, "Please provide a time limit, e.g., /open 300", nil)
-
-		return err
+		},
+		)
+		if err != nil {
+			return fmt.Errorf("failed to send source: %w", err)
+		}
+		history = chat
 
 	}
+	// Check if this is a reply and if it's replying to the bot
+	if msg.ReplyToMessage != nil && msg.ReplyToMessage.From != nil && msg.ReplyToMessage.From.Id == b.Id {
 
-	clockLimit := args[1]
+		//TODO: room for improvement on the hardcoded prompt :)
+b.SendChatAction(msg.Chat.Id, "typing", nil)
+		reply, chat := gemini.GeminiResponse(msg.Text, gemini.Gemma_4_26_A4B.String(), history, systemInstruction)
 
-	increment := "0"
+		_, err := msg.Reply(b, reply, &gotgbot.SendMessageOpts{
+			ParseMode: "MarkdownV2",
+		},
+		)
+		if err != nil {
+			return fmt.Errorf("failed to send source: %w", err)
+		}
+		history = chat
+	}
+	for _, e := range msg.Entities {
+		if e.Type == "mention" {
+			mentioned := msg.Text[e.Offset : e.Offset+e.Length]
+			if mentioned == botUserName {
+b.SendChatAction(msg.Chat.Id, "typing", nil)
+				reply, chat := gemini.GeminiResponse(msg.Text, gemini.Gemma_4_26_A4B.String(), history, systemInstruction)
+				_, err := msg.Reply(b, reply, &gotgbot.SendMessageOpts{
+					ParseMode: "MarkdownV2",
+				},
+				)
+				if err != nil {
+					return fmt.Errorf("failed to send source: %w", err)
+				}
+				history = chat
 
-	if len(args) > 2 {
+			}
 
-		increment = args[2]
+		}
 
 	}
-
-	openChallenge(b, ctx, clockLimit, increment, "Open Challenge Duel", false)
 
 	return nil
 
